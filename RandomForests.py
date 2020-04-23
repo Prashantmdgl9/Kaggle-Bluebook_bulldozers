@@ -15,6 +15,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import math
 import dateutil.parser
+from sklearn.model_selection import cross_val_score, GridSearchCV, cross_val_predict
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
 
 tc.visualization.set_target('browser')
 Path = "FastAI/ML/bluebook-for-bulldozers/"
@@ -38,7 +41,8 @@ sf.show()
 # Split train and test
 sf['label'] = sf['Saleprice_log']
 sf = sf.remove_column('Saleprice_log')
-len(sf)
+sf['age'] = sf['YearMade'] - sf['saledate.year']
+
 train_data = sf[0:320000]
 test_data = sf[320000:len(sf)]
 train_data.shape
@@ -61,7 +65,6 @@ results
 
 # Further iterations
 
-sf.shape
 sf_copy = sf
 sf_tmp = tc.SFrame()
 lst = []
@@ -72,7 +75,6 @@ sf_tmp = sf_tmp.add_column(sf.column_names())
 sf_tmp = sf_tmp.add_column(lst)
 
 sf_tmp.sort('X2',ascending = False).print_rows(58)
-
 # Many columns have missing values
 ## Let's treat the numeric missing values but before let's change the SFrame to DataFrame as SFrame isn't letting me work with the dtype
 
@@ -95,19 +97,17 @@ for col in df_2.columns:
     df_2[col] = df_2[col].cat.codes
 
 
-def fill_cat_na(df):
+def cat_na(df):
     for dt, col in zip(df.dtypes, df):
         if str(dt) == 'category':
             df[col] = df[col].fillna(df[col].mode().iloc[0])
 
-fill_cat_na(df_2)
+cat_na(df_2)
 
 pd.DataFrame((df_1.isna().sum()/len(df_1)).sort_values(ascending=False), columns=['Null percent'])
 df_f = pd.concat([df_1, df_2], axis =1)
 df_f.shape
-#Calculate age of the machine
 df_f.columns
-df_f['age'] = df['YearMade'] - df['saledate.year']
 
 ## Train test split
 
@@ -121,19 +121,19 @@ df_m = train_f.drop(['label'], axis = 1)
 y_test = test_f['label']
 df_m_test = test_f.drop(['label'], axis = 1)
 
-#Model
+#Base line Model without any parameter tuning
+# n_jobs = -1 means you want to parallelise the code. You are asking to create a separate job for each of the CPU your machine has.
 m = RandomForestRegressor(n_jobs=-1)
 m.fit(df_m, y)
 m.score(df_m,y)
 
 
-def rmse(x,y): return math.sqrt(((x-y)**2).mean())
+def rmse(x,y):
+    return math.sqrt(((x-y)**2).mean())
 
 # Training predictions (to demonstrate overfitting)
 train_rf_predictions = m.predict(df_m)
 
-def rmse(x,y):
-     return math.sqrt(((x-y)**2).mean())
 #train rmse
 rmse(train_rf_predictions, y)
 
@@ -143,3 +143,77 @@ rf_predictions = m.predict(df_m_test)
 m.score(df_m_test, y_test)
 #test rmse
 rmse(rf_predictions, y_test)
+
+# n_estimators means the number of trees we want to grow, generally 30 to 40 trees seem a good number
+# min_samples_leaf is another paramter that can be tuned, it tells about minimum number of samples required at each leaf node for it to be forked further. I generally use 1, 3, 5
+# max_depth controls the depth of the tree, otherwise the tree will try to achieve purity in each leaaf node
+# max_features is about choosing a random subset of columns to grow and split each tree. 1 means all, 0.5 means half of the columns, sqrt and log 2 are also good options
+param_grid = {
+    'bootstrap': [True],
+    'max_depth': [3, 5, None],
+    'max_features': [0.5, 1, 'sqrt'],
+    'min_samples_leaf': [1, 3],
+    'n_estimators': [10, 20, 40]
+}
+
+def hyperparameter_opt (df, y):
+    g_search = GridSearchCV(estimator=RandomForestRegressor(), param_grid = param_grid , cv = 2, verbose = 1, n_jobs = -1)
+    g_results = g_search.fit(df, y)
+    params_selected = g_results.best_params_
+    return params_selected, g_search
+
+params_selected, g_search = hyperparameter_opt(df_m, y)
+
+model_search = RandomForestRegressor(bootstrap=params_selected['bootstrap'], max_depth=params_selected["max_depth"], \
+                            n_estimators=params_selected["n_estimators"], max_features=params_selected['max_features'],\
+                            min_samples_leaf=params_selected['min_samples_leaf'], random_state=False, verbose=True)
+
+
+model_search.fit(df_m, y)
+model_search.score(df_m, y)
+
+model_search.fit(df_m_test, y_test)
+model_search.score(df_m_test, y_test)
+ model_search_pred = model_search.predict(df_m_test)
+ rmse(model_search_pred, y_test)
+
+var_importances = list(model_search.feature_importances_)
+feature_list = df_m.columns
+feature_data = {'feature': feature_list, 'importances' : var_importances}
+feature_importances = pd.DataFrame(feature_data)
+sorted_features = feature_importances.sort_values('importances', ascending=False).head(20)
+
+
+#plotting graph
+x_values = list(range(len(sorted_features)))
+x_values
+# Make a bar chart
+def plt_chart(x_values, importances, feature_list ):
+    plt.style.use('fivethirtyeight')
+    plt.figure(figsize=(8,8))
+    plt.xticks(x_values, feature_list, rotation='vertical')
+    plt.ylabel('Variable Importance'); plt.xlabel('Feature'); plt.title('RF variable Importances');
+    plt.bar(x_values, importances, orientation = 'vertical')
+
+
+plt_chart(x_values, sorted_features.importances, sorted_features.feature)
+
+
+# Cumulative importances
+cumlative_features = feature_importances.sort_values('importances', ascending=False)
+cumulative_importances = np.cumsum(cumlative_features.importances)
+x_c = list(range(len(cumlative_features)))
+
+def cumulative_plot(x_c, cumulative_importances):
+    plt.style.use('fivethirtyeight')
+    plt.figure(figsize=(20,10))
+    # Draw line at 95% of importance retained
+    plt.hlines(y = 0.95, xmin=0, xmax=len(cumlative_features), color = 'b', linestyles = 'dashed')
+    # Format x ticks and labels
+    plt.xticks(x_c, cumlative_features.feature, rotation = 'vertical')
+    # Axis labels and title
+    plt.xlabel('Feature'); plt.ylabel('Cumulative Importance'); plt.title('Cumulative Importances')
+    # Make a line graph
+    plt.plot(x_c, cumulative_importances, 'r-')
+
+cumulative_plot(x_c, cumulative_importances)
